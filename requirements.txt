@@ -1,4 +1,5 @@
 flask
 flask-cors
 gunicorn
-openai
+faster-whisper
+imageio-ffmpeg
