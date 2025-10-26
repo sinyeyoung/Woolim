@@ -1,33 +1,40 @@
-# app.py
-import re
-import difflib
+# app.py (Flask 전용, 복붙용)
 import os
+import io
 import tempfile
+from typing import Optional
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ffmpeg 바이너리 준비 (Render에서 apt 사용 불가 → imageio-ffmpeg 사용)
+# ---- ffmpeg 경로 준비 (pydub 사용 시 필요) ----
 try:
     import imageio_ffmpeg
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
     ffmpeg_dir = os.path.dirname(ffmpeg_path)
     os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-except Exception as _:
-    # 실패해도 WAV(PCM)만 다루면 운 좋게 통과할 수 있음. 되도록 위 패키지 설치 권장.
-    pass
+except Exception:
+    pass  # ffmpeg 없어도 no-op 변환으로 동작 가능
+
+# ---- pydub(있으면 실제 16k/mono 변환, 없으면 no-op) ----
+try:
+    from pydub import AudioSegment
+    USE_PYDUB = True
+except Exception:
+    USE_PYDUB = False
 
 app = Flask(__name__)
 CORS(app)
 
-# 업로드 용량 제한 (Render 무료는 과도한 큰 파일 비추천)
+# 업로드 용량 제한
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 # ---- 모델 설정 (환경변수로 조정 가능) ----
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")   # tiny | base | small ...
 DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")   # cpu (Render 무료는 GPU 없음)
 COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8") # int8 권장(저메모리)
+LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")      # 한국어
 BEAM_SIZE     = int(os.environ.get("WHISPER_BEAM", "1"))  # 1=greedy
-LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")      # 한국어 위주면 "ko"
 
 _model = None  # lazy load
 
@@ -35,7 +42,6 @@ def get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        # 첫 호출 시 로드 (모델은 /opt/render/project/.cache 아래로 캐시됨)
         _model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
     return _model
 
@@ -47,30 +53,60 @@ def home():
 def health():
     return jsonify({"ok": True})
 
+def _ensure_16k_mono_path(src_wav_path: str) -> str:
+    """
+    입력: 원본 WAV 경로
+    출력: 16kHz/mono 보장된 WAV 임시파일 경로 (no-op이면 원본 경로 그대로 반환)
+    - pydub(+ffmpeg) 가능하면 실제 변환
+    - 불가하면 원본을 그대로 사용(Flutter가 이미 16k/mono면 충분)
+    """
+    if not USE_PYDUB:
+        return src_wav_path  # no-op
+
+    try:
+        seg = AudioSegment.from_file(src_wav_path, format="wav")
+        seg = seg.set_frame_rate(16000).set_channels(1)
+        fd, out_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        seg.export(out_path, format="wav")
+        return out_path
+    except Exception:
+        # 변환 실패 시 원본 경로 사용
+        return src_wav_path
+
 def _stt_from_file(tmp_path: str) -> str:
     """
-    faster-whisper로 transcribe 수행.
-    파일은 WAV 16kHz mono 기준(지금 Flutter가 그렇게 보냄).
+    faster-whisper로 transcribe.
+    필요 시 16k/mono로 변환된 경로를 실제로 사용.
     """
     model = get_model()
 
-    wav16 = _ensure_16k_mono(tmp_path)
-    
-    # 간단/저자원 설정 (Render 프리티어 고려)
-    segments, info = model.transcribe( 
-        tmp_path,
-        language="ko",
-        task="transcribe",
-        beam_size=1,
-        temperature=0.0,
-        vad_filter=False,
-        vad_parameters=dict(min_silence_duration_ms=500),
-    )
-    text = " ".join([seg.text.strip() for seg in segments]).strip()
-    return text
+    # 16k/mono 보장
+    norm_path = _ensure_16k_mono_path(tmp_path)
+    cleanup_norm = (norm_path != tmp_path)
+
+    try:
+        segments, info = model.transcribe(
+            norm_path,
+            language=LANGUAGE,
+            task="transcribe",
+            beam_size=BEAM_SIZE,
+            temperature=0.0,
+            vad_filter=False,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+        text = " ".join([seg.text.strip() for seg in segments]).strip()
+        return text
+    finally:
+        # 변환 파일을 생성했으면 정리
+        if cleanup_norm:
+            try:
+                os.remove(norm_path)
+            except Exception:
+                pass
 
 def _handle_stt_request():
-    # 1) multipart/form-data
+    # 1) multipart/form-data (field: file | audio)
     if request.content_type and "multipart/form-data" in request.content_type:
         file = request.files.get("file") or request.files.get("audio")
         if not file:
@@ -115,92 +151,3 @@ def stt_root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-
-## 추가
-# ==== STT 패치: 바로 붙여넣기 ====
-from typing import Optional
-from fastapi import Request, UploadFile, File, HTTPException
-
-import io
-
-try:
-    from pydub import AudioSegment
-    USE_PYDUB = True
-except Exception:
-    USE_PYDUB = False
-
-def _ensure_16k_mono(wav_bytes: bytes) -> bytes:
-    # ffmpeg 미설치면 그냥 원본 리턴(에러 방지용)
-    if not USE_PYDUB:
-        return wav_bytes
-    try:
-        seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
-        seg = seg.set_frame_rate(16000).set_channels(1)
-        buf = io.BytesIO()
-        seg.export(buf, format="wav")
-        return buf.getvalue()
-    except Exception:
-        return wav_bytes
-
-def _transcribe(wav_bytes: bytes) -> str:
-    # TODO: 실제 STT 엔진 연결(Whisper 등)
-    return "음성을 인식했습니다(데모)."
-
-async def _handle_stt_common(
-    file_part: Optional[UploadFile],
-    audio_part: Optional[UploadFile],
-    raw_wav: Optional[bytes],
-):
-    data: Optional[bytes] = None
-
-    if file_part is not None:
-        data = await file_part.read()
-    elif audio_part is not None:
-        data = await audio_part.read()
-    elif raw_wav is not None:
-        data = raw_wav
-
-    if not data:
-        raise HTTPException(status_code=400, detail="No audio data")
-
-    fixed = _ensure_16k_mono(data)
-    try:
-        text = _transcribe(fixed)
-        return {"text": text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"stt_failed: {e}")
-
-@app.post("/api/stt")
-async def stt_api(
-    request: Request,
-    file: Optional[UploadFile] = File(default=None),
-    audio: Optional[UploadFile] = File(default=None),
-):
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("audio/"):
-        raw = await request.body()
-        return await _handle_stt_common(None, None, raw)
-    return await _handle_stt_common(file, audio, None)
-
-@app.post("/stt")
-async def stt_alias(
-    request: Request,
-    file: Optional[UploadFile] = File(default=None),
-    audio: Optional[UploadFile] = File(default=None),
-):
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("audio/"):
-        raw = await request.body()
-        return await _handle_stt_common(None, None, raw)
-    return await _handle_stt_common(file, audio, None)
-# ==== STT 패치 끝 ====
-# === HOTFIX: _ensure_16k_mono 미정의로 500 나는 문제 즉시 해결용 ===
-# 서버가 이미 16kHz/mono WAV를 받는다면 변환은 생략해도 됩니다.
-try:
-    _ensure_16k_mono  # 이미 정의돼 있으면 그대로 사용
-except NameError:
-    def _ensure_16k_mono(wav_bytes: bytes) -> bytes:
-        # 변환 없이 원본을 그대로 반환 (no-op)
-        return wav_bytes
-# === HOTFIX 끝 ===
-
