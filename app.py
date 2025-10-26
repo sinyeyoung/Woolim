@@ -194,4 +194,13 @@ async def stt_alias(
         return await _handle_stt_common(None, None, raw)
     return await _handle_stt_common(file, audio, None)
 # ==== STT 패치 끝 ====
+# === HOTFIX: _ensure_16k_mono 미정의로 500 나는 문제 즉시 해결용 ===
+# 서버가 이미 16kHz/mono WAV를 받는다면 변환은 생략해도 됩니다.
+try:
+    _ensure_16k_mono  # 이미 정의돼 있으면 그대로 사용
+except NameError:
+    def _ensure_16k_mono(wav_bytes: bytes) -> bytes:
+        # 변환 없이 원본을 그대로 반환 (no-op)
+        return wav_bytes
+# === HOTFIX 끝 ===
 
