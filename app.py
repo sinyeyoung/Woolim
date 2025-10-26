@@ -130,9 +130,11 @@ if __name__ == "__main__":
     
 def _lite_cleanup(text: str) -> str:
     """가벼운 정리: 연속 공백/불필요 공백/기본 문장부호 정돈."""
-    t = (text or "").strip()
-    if not t:
-        return t
+    t = re.sub(r"\b친구\s*만남\b", "친구를 만났어", t)
+    if t and t[-1] not in ".!?…":
+        t += "."
+    return t
+    
     # 연속 공백 제거
     t = re.sub(r"\s+", " ", t)
     # 문장부호 앞 공백 제거
