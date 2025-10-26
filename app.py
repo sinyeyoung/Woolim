@@ -39,11 +39,6 @@ def get_model():
         _model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
     return _model
 
-def _ensure_16k_mono(in_path: str) -> str:
-    out_path = in_path + ".16k.wav"
-    os.system(f'ffmpeg -y -loglevel error -i "{in_path}" -ac 1 -ar 16000 -c:a pcm_s16le "{out_path}"')
-    return out_path
-
 @app.route("/")
 def home():
     return jsonify({"message": "서버 연결 성공!"})
@@ -62,8 +57,7 @@ def _stt_from_file(tmp_path: str) -> str:
     wav16 = _ensure_16k_mono(tmp_path)
     
     # 간단/저자원 설정 (Render 프리티어 고려)
-    segments, info = model.transcribe(
-        wav16, 
+    segments, info = model.transcribe( 
         tmp_path,
         language="ko",
         task="transcribe",
@@ -73,13 +67,6 @@ def _stt_from_file(tmp_path: str) -> str:
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     text = " ".join([seg.text.strip() for seg in segments]).strip()
-
-    # 임시 파일 정리
-    try:
-        os.remove(wav16)
-    except Exception:
-        pass
-        
     return text
 
 def _handle_stt_request():
@@ -128,63 +115,3 @@ def stt_root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-    
-def _lite_cleanup(text: str) -> str:
-    """가벼운 정리: 연속 공백/불필요 공백/기본 문장부호 정돈."""
-    t = re.sub(r"\b친구\s*만남\b", "친구를 만났어", t)
-
-    t = re.sub(r"\b친구\s*만남\b", "친구를 만났어", t)
-    t = re.sub(r"\b밥\s*먹음\b", "밥을 먹었어", t)
-    t = re.sub(r"\b갔따\b", "갔다", t)
-    
-    if t and t[-1] not in ".!?…":
-        t += "."
-    
-    # 연속 공백 제거
-    t = re.sub(r"\s+", " ", t)
-    # 문장부호 앞 공백 제거
-    t = re.sub(r"\s+([,.!?])", r"\1", t)
-    # 문장부호 뒤 공백 보장
-    t = re.sub(r"([,.!?])(?!\s|$)", r"\1 ", t)
-    # 따옴표/괄호 주변 공백 정리
-    t = re.sub(r"\(\s+", "(", t)
-    t = re.sub(r"\s+\)", ")", t)
-    t = re.sub(r"\s+”", "”", t)
-    t = re.sub(r"“\s+", "“", t)
-    # 끝에 마침표 없으면 가볍게 붙여주기(짧은 문장 시각적 구분용)
-    if t and t[-1] not in ".!?…":
-        t += "."
-    return t
-
-def _too_different(a: str, b: str, thresh: float = 0.55) -> bool:
-    """과수정 방지: 전/후 유사도가 너무 떨어지면 교정 취소."""
-    try:
-        ratio = difflib.SequenceMatcher(a=a, b=b).ratio()
-        return ratio < thresh
-    except Exception:
-        return False
-
-@app.route("/api/correct", methods=["POST"])
-def api_correct():
-    data = request.get_json(silent=True) or {}
-    original = (data.get("text") or "").strip()
-    if not original:
-        return jsonify({"error": "empty_text"}), 400
-        
-     # 1) lite 정리
-    corrected = _lite_cleanup(original)
-    reason = "lite"
-
-    # 2) 과수정 방지 (원문과 너무 달라지면 원문 유지)
-    if _too_different(original, corrected):
-        corrected = original
-        reason = "fallback"
-
-    return jsonify({
-        "original_text": original,
-        "corrected_text": corrected,
-        "changed": corrected != original,
-        "reason": reason
-    })
-
-
