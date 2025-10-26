@@ -115,3 +115,83 @@ def stt_root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
+## 추가
+# ==== STT 패치: 바로 붙여넣기 ====
+from typing import Optional
+from fastapi import Request, UploadFile, File, HTTPException
+
+import io
+
+try:
+    from pydub import AudioSegment
+    USE_PYDUB = True
+except Exception:
+    USE_PYDUB = False
+
+def _ensure_16k_mono(wav_bytes: bytes) -> bytes:
+    # ffmpeg 미설치면 그냥 원본 리턴(에러 방지용)
+    if not USE_PYDUB:
+        return wav_bytes
+    try:
+        seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+        seg = seg.set_frame_rate(16000).set_channels(1)
+        buf = io.BytesIO()
+        seg.export(buf, format="wav")
+        return buf.getvalue()
+    except Exception:
+        return wav_bytes
+
+def _transcribe(wav_bytes: bytes) -> str:
+    # TODO: 실제 STT 엔진 연결(Whisper 등)
+    return "음성을 인식했습니다(데모)."
+
+async def _handle_stt_common(
+    file_part: Optional[UploadFile],
+    audio_part: Optional[UploadFile],
+    raw_wav: Optional[bytes],
+):
+    data: Optional[bytes] = None
+
+    if file_part is not None:
+        data = await file_part.read()
+    elif audio_part is not None:
+        data = await audio_part.read()
+    elif raw_wav is not None:
+        data = raw_wav
+
+    if not data:
+        raise HTTPException(status_code=400, detail="No audio data")
+
+    fixed = _ensure_16k_mono(data)
+    try:
+        text = _transcribe(fixed)
+        return {"text": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"stt_failed: {e}")
+
+@app.post("/api/stt")
+async def stt_api(
+    request: Request,
+    file: Optional[UploadFile] = File(default=None),
+    audio: Optional[UploadFile] = File(default=None),
+):
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("audio/"):
+        raw = await request.body()
+        return await _handle_stt_common(None, None, raw)
+    return await _handle_stt_common(file, audio, None)
+
+@app.post("/stt")
+async def stt_alias(
+    request: Request,
+    file: Optional[UploadFile] = File(default=None),
+    audio: Optional[UploadFile] = File(default=None),
+):
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("audio/"):
+        raw = await request.body()
+        return await _handle_stt_common(None, None, raw)
+    return await _handle_stt_common(file, audio, None)
+# ==== STT 패치 끝 ====
+
