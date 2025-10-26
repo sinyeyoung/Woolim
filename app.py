@@ -63,6 +63,7 @@ def _stt_from_file(tmp_path: str) -> str:
     
     # 간단/저자원 설정 (Render 프리티어 고려)
     segments, info = model.transcribe(
+        wav16, 
         tmp_path,
         language="ko",
         task="transcribe",
@@ -138,7 +139,6 @@ def _lite_cleanup(text: str) -> str:
     
     if t and t[-1] not in ".!?…":
         t += "."
-    return t
     
     # 연속 공백 제거
     t = re.sub(r"\s+", " ", t)
@@ -170,12 +170,21 @@ def api_correct():
     original = (data.get("text") or "").strip()
     if not original:
         return jsonify({"error": "empty_text"}), 400
-    corrected = original.strip()  # (지금은 간단 교정)
+        
+     # 1) lite 정리
+    corrected = _lite_cleanup(original)
+    reason = "lite"
+
+    # 2) 과수정 방지 (원문과 너무 달라지면 원문 유지)
+    if _too_different(original, corrected):
+        corrected = original
+        reason = "fallback"
+
     return jsonify({
         "original_text": original,
         "corrected_text": corrected,
         "changed": corrected != original,
-        "reason": "lite"
+        "reason": reason
     })
 
 
