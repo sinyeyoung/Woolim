@@ -37,6 +37,11 @@ def get_model():
         _model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
     return _model
 
+def _ensure_16k_mono(in_path: str) -> str:
+    out_path = in_path + ".16k.wav"
+    os.system(f'ffmpeg -y -loglevel error -i "{in_path}" -ac 1 -ar 16000 -c:a pcm_s16le "{out_path}"')
+    return out_path
+
 @app.route("/")
 def home():
     return jsonify({"message": "서버 연결 성공!"})
@@ -51,15 +56,27 @@ def _stt_from_file(tmp_path: str) -> str:
     파일은 WAV 16kHz mono 기준(지금 Flutter가 그렇게 보냄).
     """
     model = get_model()
+
+    wav16 = _ensure_16k_mono(tmp_path)
+    
     # 간단/저자원 설정 (Render 프리티어 고려)
     segments, info = model.transcribe(
         tmp_path,
-        language=LANGUAGE,          # 언어 힌트(자동 감지보다 빠름)
-        beam_size=BEAM_SIZE,        # 1이면 그리디
-        vad_filter=True,            # 구간 추출(VAD)
+        language="ko",
+        task="transcribe",
+        beam_size=1,
+        temperature=0.0,
+        vad_filter=False,
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     text = " ".join([seg.text.strip() for seg in segments]).strip()
+
+    # 임시 파일 정리
+    try:
+        os.remove(wav16)
+    except Exception:
+        pass
+        
     return text
 
 def _handle_stt_request():
