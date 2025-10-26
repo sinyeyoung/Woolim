@@ -157,3 +157,18 @@ def _too_different(a: str, b: str, thresh: float = 0.55) -> bool:
     except Exception:
         return False
 
+@app.route("/api/correct", methods=["POST"])
+def api_correct():
+    data = request.get_json(silent=True) or {}
+    original = (data.get("text") or "").strip()
+    if not original:
+        return jsonify({"error": "empty_text"}), 400
+    corrected = original.strip()  # (지금은 간단 교정)
+    return jsonify({
+        "original_text": original,
+        "corrected_text": corrected,
+        "changed": corrected != original,
+        "reason": "lite"
+    })
+
+
