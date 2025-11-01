@@ -30,7 +30,7 @@ CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 # ---- 모델 설정 (환경변수로 조정 가능) ----
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")   # tiny | base | small ...
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")   # tiny | base | small ...
 DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")   # cpu (Render 무료는 GPU 없음)
 COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8") # int8 권장(저메모리)
 LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")      # 한국어
