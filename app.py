@@ -7,6 +7,7 @@ from typing import Optional
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import json
+
 # ---- ffmpeg 경로 준비 (pydub 사용 시 필요) ----
 try:
     import imageio_ffmpeg
@@ -159,6 +160,8 @@ def correct_text():
     try:
         data = request.get_json(force=True)
         text = data.get("text", "").strip()
+        print(f"[DEBUG] /api/correct called")              # ✅ 추가
+        print(f"[DEBUG] Received text: {text}")            # ✅ 추가
 
         if not text:
             return j({"error": "empty_text", "detail": "text field is empty"}, 400)
@@ -171,7 +174,7 @@ def correct_text():
         # 문장 끝에 마침표 붙이기 (없을 경우)
         if not corrected.endswith(('.', '!', '?')):
             corrected += '.'
-
+        print(f"[DEBUG] Corrected text: {corrected}")       # ✅ 추가
         return j({"corrected": corrected}, 200)
     except Exception as e:
         return j({"error": "correct_failed", "detail": str(e)}, 500)
