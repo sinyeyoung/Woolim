@@ -4,9 +4,9 @@ import io
 import tempfile
 from typing import Optional
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-
+import json
 # ---- ffmpeg 경로 준비 (pydub 사용 시 필요) ----
 try:
     import imageio_ffmpeg
@@ -25,7 +25,14 @@ except Exception:
 
 app = Flask(__name__)
 CORS(app)
-
+app.config["JSON_AS_ASCII"] = False
+app.json.ensure_ascii = False
+def j(data, status=200):
+    return Response(
+        json.dumps(data, ensure_ascii=False),
+        status=status,
+        mimetype="application/json; charset=utf-8"
+    )
 # 업로드 용량 제한
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
@@ -47,11 +54,11 @@ def get_model():
 
 @app.route("/")
 def home():
-    return jsonify({"message": "서버 연결 성공!"})
+    return j({"message": "서버 연결 성공!"})
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True})
+    return j({"ok": True})
 
 def _ensure_16k_mono_path(src_wav_path: str) -> str:
     """
@@ -110,15 +117,15 @@ def _handle_stt_request():
     if request.content_type and "multipart/form-data" in request.content_type:
         file = request.files.get("file") or request.files.get("audio")
         if not file:
-            return jsonify({"error": "no_file", "detail": "Use field 'file' or 'audio'."}), 400
+            return j({"error": "no_file", "detail": "Use field 'file' or 'audio'."}), 400
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             file.save(tmp.name)
             tmp_path = tmp.name
         try:
             text = _stt_from_file(tmp_path)
-            return jsonify({"text": text}), 200
+            return j({"text": text}), 200
         except Exception as e:
-            return jsonify({"error": "stt_failed", "detail": str(e)}), 500
+            return j({"error": "stt_failed", "detail": str(e)}), 500
         finally:
             try: os.remove(tmp_path)
             except: pass
@@ -131,14 +138,14 @@ def _handle_stt_request():
             tmp_path = tmp.name
         try:
             text = _stt_from_file(tmp_path)
-            return jsonify({"text": text}), 200
+            return j({"text": text}), 200
         except Exception as e:
-            return jsonify({"error": "stt_failed", "detail": str(e)}), 500
+            return j({"error": "stt_failed", "detail": str(e)}), 500
         finally:
             try: os.remove(tmp_path)
             except: pass
 
-    return jsonify({"error": "empty_body", "detail": "no audio payload"}), 400
+    return j({"error": "empty_body", "detail": "no audio payload"}), 400
 
 @app.route("/api/stt", methods=["POST"])
 def stt_api():
