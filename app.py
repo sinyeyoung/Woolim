@@ -155,16 +155,50 @@ def stt_api():
 @app.route("/stt", methods=["POST"])
 def stt_root():
     return _handle_stt_request()
+import requests
+
 @app.route("/api/correct", methods=["POST"])
 def correct_text():
     try:
         data = request.get_json(force=True)
         text = data.get("text", "").strip()
-        print(f"[DEBUG] /api/correct called")              # ✅ 추가
-        print(f"[DEBUG] Received text: {text}")            # ✅ 추가
 
         if not text:
             return j({"error": "empty_text", "detail": "text field is empty"}, 400)
+
+        # ✅ 허깅페이스 교정 모델로 호출 (원하면 본인 모델로 변경)
+        HF_MODEL_ID = os.environ.get("HF_CORRECT_MODEL", "psyche/KoGrammarCorrection")
+        HF_TOKEN    = os.environ.get("HF_TOKEN")  # Render 환경변수에 추가 필수
+
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {"inputs": text}
+
+        resp = requests.post(
+            f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return j({"error": "hf_failed", "detail": resp.text}, 502)
+
+        result = resp.json()
+        # HF 응답 파싱 (generated_text 또는 text 사용)
+        corrected = None
+        if isinstance(result, list) and result:
+            corrected = result[0].get("generated_text") or result[0].get("text")
+
+        if not corrected:
+            corrected = text  # 파싱 실패 시 원문 반환(최소 안전장치)
+
+        return j({"corrected": corrected.strip()}, 200)
+
+    except Exception as e:
+        return j({"error": "correct_failed", "detail": str(e)}, 500)
+": "empty_text", "detail": "text field is empty"}, 400)
 
         # --- 교정 로직 (간단 예시) ---
         corrected = text
