@@ -28,7 +28,7 @@ CORS(app)
 
 # 업로드 용량 제한
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
-app.config["JSON_AS_ASCII"] = False
+
 # ---- 모델 설정 (환경변수로 조정 가능) ----
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")   # tiny | base | small ...
 DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")   # cpu (Render 무료는 GPU 없음)
