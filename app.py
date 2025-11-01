@@ -154,6 +154,27 @@ def stt_api():
 @app.route("/stt", methods=["POST"])
 def stt_root():
     return _handle_stt_request()
+@app.route("/api/correct", methods=["POST"])
+def correct_text():
+    try:
+        data = request.get_json(force=True)
+        text = data.get("text", "").strip()
+
+        if not text:
+            return j({"error": "empty_text", "detail": "text field is empty"}, 400)
+
+        # --- 교정 로직 (간단 예시) ---
+        corrected = text
+        corrected = corrected.replace("  ", " ")  # 두 칸 이상 공백 제거
+        corrected = corrected.strip().capitalize()  # 문장 첫글자 대문자
+
+        # 문장 끝에 마침표 붙이기 (없을 경우)
+        if not corrected.endswith(('.', '!', '?')):
+            corrected += '.'
+
+        return j({"corrected": corrected}, 200)
+    except Exception as e:
+        return j({"error": "correct_failed", "detail": str(e)}, 500)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
