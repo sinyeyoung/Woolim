@@ -1,9 +1,19 @@
-flask
-flask-cors
-gunicorn
-requests
-imageio-ffmpeg
-pydub
-faster-whisper==1.0.3
-numpy>=1.24
+flask>=2.3,<3.0
+flask-cors>=3.0
+gunicorn>=21.2
+
+requests>=2.31
+numpy>=1.24,<2.0
+pydub>=0.25
 soundfile>=0.12
+
+# 미디어/디코딩
+av==10.0.0
+ffmpeg-python
+
+# STT
+ctranslate2>=4.3,<5
+faster-whisper==1.0.3
+
+# 선택: 이미 ffmpeg를 apt로 설치한다면 굳이 필요 없음
+# imageio-ffmpeg
