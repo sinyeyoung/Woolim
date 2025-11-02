@@ -7,3 +7,4 @@ libswscale-dev
 libswresample-dev
 libavutil-dev
 pkg-config
+libsndfile1
