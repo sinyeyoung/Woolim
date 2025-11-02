@@ -40,7 +40,7 @@ def j(data, status: int = 200) -> Response:
     )
 
 # ---- 모델 설정 (환경변수로 조정 가능) ----
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")   # tiny | base | small ...
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")   # tiny | base | small ...
 DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")    # Render 무료는 GPU 없음
 COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8")  # 저메모리
 LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")       # 한국어
