@@ -238,3 +238,29 @@ if __name__ == "__main__":
     # 개발용: python app.py
     # 운영(예: Render/Gunicorn)은 WSGI로 구동
     app.run(host="0.0.0.0", port=5000, debug=False)
+
+# ───────────────────────── STT API ─────────────────────────
+# Flutter는 1) multipart(file=...) → 실패 시 2) RAW(audio/wav) 순으로 보냅니다.
+@app.post("/api/stt")
+def api_stt():
+    # 1) 멀티파트 수신 (file 필드)
+    if "file" in request.files:
+        f = request.files["file"]
+        # 여기에서 Whisper 등으로 실제 STT 수행하면 됨
+        # 예) text = whisper_transcribe(f.read())
+        filename = getattr(f, "filename", "audio.wav")
+        # 테스트용 더미 응답(수신 확인)
+        return jsonify({"text": f"파일 {filename}을(를) 받았습니다"}), 200
+
+    # 2) RAW 오디오 수신 (Content-Type: audio/wav)
+    ctype = request.headers.get("Content-Type", "")
+    if ctype.startswith("audio/"):
+        raw = request.get_data()  # bytes
+        if not raw:
+            return jsonify({"error": "empty audio body"}), 400
+        # 실제 STT 수행 위치
+        # 예) text = whisper_transcribe(raw)
+        return jsonify({"text": f"오디오 {len(raw)}바이트 수신"}), 200
+
+    return jsonify({"error": "no audio file found"}), 400
+
