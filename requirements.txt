@@ -5,3 +5,4 @@ requests
 pydub
 imageio-ffmpeg
 faster-whisper==1.0.3
+av==10.0.0
