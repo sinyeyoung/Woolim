@@ -2,6 +2,6 @@ flask
 flask-cors
 gunicorn
 requests
-faster-whisper
 pydub
 imageio-ffmpeg
+faster-whisper==1.0.3
