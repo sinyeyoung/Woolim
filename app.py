@@ -1,230 +1,240 @@
-# app.py (Flask 전용, 복붙용)
-import os
-import io
-import tempfile
-import json
-from typing import Optional
-
-from flask import Flask, request, Response
-from flask_cors import CORS
-import requests
-
-# ---- ffmpeg 경로 준비 (pydub 사용 시 필요) ----
-try:
-    import imageio_ffmpeg
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    ffmpeg_dir = os.path.dirname(ffmpeg_path)
-    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-except Exception:
-    pass  # ffmpeg 없어도 no-op 변환으로 동작 가능
-
-# ---- pydub(있으면 실제 16k/mono 변환, 없으면 no-op) ----
-try:
-    from pydub import AudioSegment
-    USE_PYDUB = True
-except Exception:
-    USE_PYDUB = False
+# app.py
+from __future__ import annotations
+from flask import Flask, request, jsonify
+import re
 
 app = Flask(__name__)
-CORS(app)
-app.config["JSON_AS_ASCII"] = False  # 한글 응답 깨짐 방지
-# 업로드 용량 제한
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
-def j(data, status: int = 200) -> Response:
-    """한글 안전 JSON 응답 헬퍼"""
-    return Response(
-        json.dumps(data, ensure_ascii=False),
-        status=status,
-        mimetype="application/json; charset=utf-8"
-    )
-
-# ---- 모델 설정 (환경변수로 조정 가능) ----
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")   # tiny | base | small ...
-DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")    # Render 무료는 GPU 없음
-COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8")  # 저메모리
-LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")       # 한국어
-BEAM_SIZE     = int(os.environ.get("WHISPER_BEAM", "1"))   # 1=greedy
-
-_model = None  # lazy load
-
-def get_model():
-    global _model
-    if _model is None:
-        from faster_whisper import WhisperModel
-        _model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-    return _model
-
-@app.route("/")
-def home():
-    return j({"message": "서버 연결 성공!"})
-
-@app.route("/health")
+# ───────────────────────── Health ─────────────────────────
+@app.get("/health")
 def health():
-    return j({"ok": True})
+    return jsonify(ok=True), 200
 
-def _ensure_16k_mono_path(src_wav_path: str) -> str:
-    """
-    입력: 원본 WAV 경로
-    출력: 16kHz/mono 보장된 WAV 임시파일 경로 (no-op이면 원본 경로 그대로 반환)
-    - pydub(+ffmpeg) 가능하면 실제 변환
-    - 불가하면 원본을 그대로 사용(Flutter가 이미 16k/mono면 충분)
-    """
-    if not USE_PYDUB:
-        return src_wav_path  # no-op
+# ───────────────────────── Correct API ─────────────────────────
+# 요청 예: { "text":"나는 오늘 너무 피곤하다 그래서 일찍 자야돼", "mode":"ending", "style":"yo" }
+@app.post("/api/correct")
+def api_correct():
+    data = request.get_json(silent=True) or {}
+    text: str = (data.get("text") or "").strip()
+    mode: str = (data.get("mode") or "ending").strip()
+    style: str = (data.get("style") or "yo").strip()
 
-    try:
-        seg = AudioSegment.from_file(src_wav_path, format="wav")
-        seg = seg.set_frame_rate(16000).set_channels(1)
-        fd, out_path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        seg.export(out_path, format="wav")
-        return out_path
-    except Exception:
-        # 변환 실패 시 원본 경로 사용
-        return src_wav_path
-
-def _stt_from_file(tmp_path: str) -> str:
-    """
-    faster-whisper로 transcribe.
-    필요 시 16k/mono로 변환된 경로를 실제로 사용.
-    """
-    model = get_model()
-
-    # 16k/mono 보장
-    norm_path = _ensure_16k_mono_path(tmp_path)
-    cleanup_norm = (norm_path != tmp_path)
+    if not text:
+        return jsonify(error="no text provided"), 400
 
     try:
-        segments, info = model.transcribe(
-            norm_path,
-            language=LANGUAGE,
-            task="transcribe",
-            beam_size=BEAM_SIZE,
-            temperature=0.0,
-            vad_filter=False,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
-        text = " ".join([seg.text.strip() for seg in segments]).strip()
-        return text
-    finally:
-        # 변환 파일을 생성했으면 정리
-        if cleanup_norm:
-            try:
-                os.remove(norm_path)
-            except Exception:
-                pass
+        # 1) 사전 정리(공백/연속 구두점 등)
+        norm = _normalize(text)
 
-def _handle_stt_request():
-    # 1) multipart/form-data (field: file | audio)
-    if request.content_type and "multipart/form-data" in request.content_type:
-        file = request.files.get("file") or request.files.get("audio")
-        if not file:
-            return j({"error": "no_file", "detail": "Use field 'file' or 'audio'."}, 400)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            file.save(tmp.name)
-            tmp_path = tmp.name
-        try:
-            text = _stt_from_file(tmp_path)
-            return j({"text": text}, 200)
-        except Exception as e:
-            return j({"error": "stt_failed", "detail": str(e)}, 500)
-        finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+        # 2) 모드 분기 (현재는 ending 위주)
+        if mode == "ending":
+            corrected = correct_ending(norm, style=style)
+        elif mode == "formal":
+            corrected = correct_ending(norm, style="formal")
+        else:
+            # 미지원 모드는 보수적으로 원문 반환
+            corrected = norm
 
-    # 2) RAW (audio/wav) 바디
-    if request.data:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(request.data)
-            tmp.flush()
-            tmp_path = tmp.name
-        try:
-            text = _stt_from_file(tmp_path)
-            return j({"text": text}, 200)
-        except Exception as e:
-            return j({"error": "stt_failed", "detail": str(e)}, 500)
-        finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+        # 3) 후처리(연속 공백 제거 등)
+        corrected = _post_normalize(corrected)
 
-    return j({"error": "empty_body", "detail": "no audio payload"}, 400)
-
-@app.route("/api/stt", methods=["POST"])
-def stt_api():
-    return _handle_stt_request()
-
-@app.route("/stt", methods=["POST"])
-def stt_root():
-    return _handle_stt_request()
-
-# -------------------- 교정 API --------------------
-@app.route("/api/correct", methods=["POST"])
-def correct_text():
-    try:
-        data = request.get_json(force=True) or {}
-        text = (data.get("text") or "").strip()
-
-        if not text:
-            return j({"error": "empty_text", "detail": "text field is empty"}, 400)
-
-        # 허깅페이스 교정 모델 호출 (환경변수로 교체 가능)
-        HF_MODEL_ID = os.environ.get("HF_CORRECT_MODEL", "psyche/KoGrammarCorrection")
-        HF_TOKEN    = os.environ.get("HF_TOKEN")
-
-        if not HF_TOKEN:
-            # 토큰이 없으면 간단한 로컬 규칙으로만 응답(서비스 죽지 않도록)
-            corrected = text.replace("  ", " ").strip()
-            if corrected and not corrected.endswith(('.', '!', '?')):
-                corrected += '.'
-            return j({"corrected": corrected}, 200)
-
-        headers = {
-            "Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json",
-        }
-        payload = {"inputs": text}
-
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}",
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            return j({"error": "hf_failed", "detail": resp.text}, 502)
-
-        result = resp.json()
-        # HF 응답 파싱 (generated_text 또는 text 사용)
-        corrected = None
-        if isinstance(result, list) and result:
-            item = result[0] or {}
-            corrected = item.get("generated_text") or item.get("text")
-
-        if not corrected:
-            corrected = text  # 파싱 실패 시 원문 반환(안전장치)
-
-        return j({"corrected": corrected.strip()}, 200)
-
+        return jsonify(original=text, corrected=corrected), 200
     except Exception as e:
-        return j({"error": "correct_failed", "detail": str(e)}, 500)
-
-import threading
-def _warmup():
-    try:
-        print("[WARMUP] Loading Whisper model...")
-        get_model()
-        print("[WARMUP] Model loaded successfully.")
-    except Exception as e:
-        print("[WARMUP] Warmup failed:", e)
-threading.Thread(target=_warmup, daemon=True).start()
+        # 실패 시에도 클라 UX를 위해 200대 + 원문 반환보다는
+        # 500을 주고 message 키도 포함(클라 파서가 여러 키를 읽음)
+        return jsonify(error="internal_error", message=str(e)), 500
 
 
-# -------------------- 앱 실행 --------------------
+# ───────────────────────── Core Logic ─────────────────────────
+def correct_ending(s: str, style: str = "yo") -> str:
+    """
+    어미·말끝 자연화 중심 보정.
+    style: 'yo'(해요체), 'hae'(해체), 'formal'(격식체)
+    """
+    # 문장 분할(문장부호 보존)
+    parts = _split_keep_delim(s)
+
+    fixed_parts = []
+    for seg, delim in parts:
+        seg_strip = seg.strip()
+        if not seg_strip:
+            fixed_parts.append(seg + delim)
+            continue
+
+        # 1) 흔한 구어체·맞춤형 교정(경어/반말/격식 변환 전에 적용)
+        seg_strip = _micro_fixes(seg_strip)
+
+        # 2) 스타일 변환
+        if style == "yo":
+            seg_strip = _to_haeyo(seg_strip)
+        elif style == "hae":
+            seg_strip = _to_hae(seg_strip)
+        elif style == "formal":
+            seg_strip = _to_formal(seg_strip)
+
+        # 3) 마침표 없으면 적절히 보완(?,! 유지)
+        if delim == "":
+            delim = "."
+
+        fixed_parts.append(seg_strip + delim)
+
+    result = "".join(fixed_parts)
+    # 쉼표 뒤 공백 등 마무리
+    result = re.sub(r"\s+([,.?!])", r"\1", result)
+    result = re.sub(r"\s{2,}", " ", result)
+    return result.strip()
+
+
+# ───────────── 스타일 변환 (간단 휴리스틱) ─────────────
+def _to_haeyo(seg: str) -> str:
+    # 반말/서술체 → 해요체
+    repl = [
+        (r"했어\b", "했어요"),
+        (r"했구나\b", "했군요"),
+        (r"했네\b", "했네요"),
+        (r"한다\b", "해요"),
+        (r"한다면\b", "하면요"),
+        (r"한다니까\b", "한다니까요"),
+        (r"한다니\b", "한다니요"),
+        (r"한다며\b", "한다면서요"),
+        (r"했지\b", "했죠"),
+        (r"해\b", "해요"),
+        (r"자\b", "가요"),           # 가자 → 가요 (권유 문장 단순화)
+        (r"야\b", "예요"),          # ~야 → ~예요
+        (r"이야\b", None),          # 이야 → 이에요/예요 (받침 규칙)
+        (r"거야\b", "거예요"),
+        (r"거지\b", "거죠"),
+        (r"거네\b", "거리네요"),
+        (r"거든\b", "거든요"),
+        (r"자야돼\b", "자야 돼요"),
+        (r"돼\b", "돼요"),
+        (r"돼야\b", "돼야 해요"),
+        (r"했단\b", "했다는"),
+        (r"했음\b", "했습니다"),
+    ]
+    seg = _apply_pairs(seg, repl)
+
+    # '이야' 규칙 처리(받침에 따라 이에요/예요)
+    seg = re.sub(r"([가-힣])이야\b", lambda m: _i_yeyo(m.group(1)), seg)
+
+    # 종결 미부호 시 마침 어조 정리
+    seg = _ensure_polite(seg)
+    return seg
+
+
+def _to_hae(seg: str) -> str:
+    # 해요체/격식 → 반말(해체)
+    repl = [
+        (r"했어요\b", "했어"),
+        (r"합니다\b", "해"),
+        (r"합니다만\b", "하지만"),
+        (r"합니까\b", "해?"),
+        (r"해요\b", "해"),
+        (r"이에요\b", "이야"),
+        (r"예요\b", "야"),
+        (r"거예요\b", "거야"),
+        (r"거죠\b", "거지"),
+        (r"됩니다\b", "돼"),
+        (r"돼요\b", "돼"),
+    ]
+    return _apply_pairs(seg, repl)
+
+
+def _to_formal(seg: str) -> str:
+    # 해요체/반말 → 격식체
+    repl = [
+        (r"했어요\b", "했습니다"),
+        (r"했어\b", "했습니다"),
+        (r"한다\b", "합니다"),
+        (r"해요\b", "합니다"),
+        (r"해\b", "합니다"),
+        (r"이에요\b", "입니다"),
+        (r"예요\b", "입니다"),
+        (r"거예요\b", "것입니다"),
+        (r"거야\b", "것입니다"),
+        (r"돼요\b", "됩니다"),
+        (r"돼\b", "됩니다"),
+    ]
+    seg = _apply_pairs(seg, repl)
+
+    # 문장 끝 조사·서술어 보정
+    seg = re.sub(r"(이다)\b", "입니다", seg)
+    return seg
+
+
+# ───────────── 사전/후처리 ─────────────
+def _normalize(s: str) -> str:
+    s = s.replace("\u200b", "")  # zero-width space
+    s = re.sub(r"[ ]{2,}", " ", s)
+    s = re.sub(r"([.?!]){2,}", r"\1", s)  # 연속 구두점 축소
+    return s.strip()
+
+def _post_normalize(s: str) -> str:
+    s = re.sub(r"\s+([,.?!])", r"\1", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s.strip()
+
+
+def _micro_fixes(seg: str) -> str:
+    """
+    어미 변환 전에 적용할 가벼운 정리:
+    - '그래서'가 두 절을 어색하게 잇는 경우는 유지(과도한 변형 방지)
+    - 자주 틀리는 띄어쓰기
+    """
+    # 자주 틀리는 띄어쓰기(돼/되)
+    seg = re.sub(r"되요\b", "돼요", seg)  # 흔한 오탈자
+    seg = re.sub(r"돼\s?야\b", "돼야", seg)
+
+    # '자야돼' → '자야 돼'
+    seg = seg.replace("자야돼", "자야 돼")
+
+    # 연결 조사/어미 간략 보정
+    seg = re.sub(r"\b것 이\b", "것이", seg)
+    seg = re.sub(r"\b거 야\b", "거야", seg)
+
+    return seg
+
+
+# ───────────── 유틸 ─────────────
+def _apply_pairs(seg: str, pairs: list[tuple[str, str | None]]) -> str:
+    for pat, rep in pairs:
+        if rep is None:
+            continue
+        seg = re.sub(pat, rep)
+    return seg
+
+def _i_yeyo(last_char: str) -> str:
+    # 받침 유무로 '이에요/예요' 결정
+    code = ord(last_char)
+    jong = (code - 0xAC00) % 28
+    return last_char + ("이에요" if jong != 0 else "예요")
+
+def _ensure_polite(seg: str) -> str:
+    """
+    어미가 너무 짧거나 반말 느낌이면 해요체로 부드럽게.
+    """
+    # 끝이 명사/형용사 추정 + 종결 없는 경우 → '이에요/예요' 보정
+    if re.search(r"[가-힣]$", seg) and not re.search(r"(요|다|함|임|니다|해|해요|다며|다니)$", seg):
+        ch = seg[-1]
+        seg = re.sub(r"[가-힣]$", _i_yeyo(ch), seg)
+    return seg
+
+def _split_keep_delim(s: str):
+    """
+    문장을 (본문, 구두점) 튜플로 쪼개되 구두점을 보존.
+    예: "안녕? 오늘 어때" -> [("안녕","?"), (" 오늘 어때","")]
+    """
+    tokens = re.split(r"([.?!])", s)
+    out = []
+    for i in range(0, len(tokens), 2):
+        seg = tokens[i]
+        delim = tokens[i + 1] if i + 1 < len(tokens) else ""
+        out.append((seg, delim))
+    return out
+
+
+# ───────────── 앱 기동 ─────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    # 개발용: python app.py
+    # 운영(예: Render/Gunicorn)은 WSGI로 구동
+    app.run(host="0.0.0.0", port=5000, debug=False)
