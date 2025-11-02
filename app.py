@@ -2,11 +2,12 @@
 import os
 import io
 import tempfile
+import json
 from typing import Optional
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, Response
 from flask_cors import CORS
-import json
+import requests
 
 # ---- ffmpeg 경로 준비 (pydub 사용 시 필요) ----
 try:
@@ -26,23 +27,24 @@ except Exception:
 
 app = Flask(__name__)
 CORS(app)
-app.config["JSON_AS_ASCII"] = False
-app.json.ensure_ascii = False
-def j(data, status=200):
+app.config["JSON_AS_ASCII"] = False  # 한글 응답 깨짐 방지
+# 업로드 용량 제한
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
+
+def j(data, status: int = 200) -> Response:
+    """한글 안전 JSON 응답 헬퍼"""
     return Response(
         json.dumps(data, ensure_ascii=False),
         status=status,
         mimetype="application/json; charset=utf-8"
     )
-# 업로드 용량 제한
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 # ---- 모델 설정 (환경변수로 조정 가능) ----
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")   # tiny | base | small ...
-DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")   # cpu (Render 무료는 GPU 없음)
-COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8") # int8 권장(저메모리)
-LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")      # 한국어
-BEAM_SIZE     = int(os.environ.get("WHISPER_BEAM", "1"))  # 1=greedy
+DEVICE        = os.environ.get("WHISPER_DEVICE", "cpu")    # Render 무료는 GPU 없음
+COMPUTE_TYPE  = os.environ.get("WHISPER_COMPUTE", "int8")  # 저메모리
+LANGUAGE      = os.environ.get("WHISPER_LANG", "ko")       # 한국어
+BEAM_SIZE     = int(os.environ.get("WHISPER_BEAM", "1"))   # 1=greedy
 
 _model = None  # lazy load
 
@@ -118,20 +120,22 @@ def _handle_stt_request():
     if request.content_type and "multipart/form-data" in request.content_type:
         file = request.files.get("file") or request.files.get("audio")
         if not file:
-            return j({"error": "no_file", "detail": "Use field 'file' or 'audio'."}), 400
+            return j({"error": "no_file", "detail": "Use field 'file' or 'audio'."}, 400)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             file.save(tmp.name)
             tmp_path = tmp.name
         try:
             text = _stt_from_file(tmp_path)
-            return j({"text": text}), 200
+            return j({"text": text}, 200)
         except Exception as e:
-            return j({"error": "stt_failed", "detail": str(e)}), 500
+            return j({"error": "stt_failed", "detail": str(e)}, 500)
         finally:
-            try: os.remove(tmp_path)
-            except: pass
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
-    # 2) RAW (audio/wav)
+    # 2) RAW (audio/wav) 바디
     if request.data:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp.write(request.data)
@@ -139,14 +143,16 @@ def _handle_stt_request():
             tmp_path = tmp.name
         try:
             text = _stt_from_file(tmp_path)
-            return j({"text": text}), 200
+            return j({"text": text}, 200)
         except Exception as e:
-            return j({"error": "stt_failed", "detail": str(e)}), 500
+            return j({"error": "stt_failed", "detail": str(e)}, 500)
         finally:
-            try: os.remove(tmp_path)
-            except: pass
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
-    return j({"error": "empty_body", "detail": "no audio payload"}), 400
+    return j({"error": "empty_body", "detail": "no audio payload"}, 400)
 
 @app.route("/api/stt", methods=["POST"])
 def stt_api():
@@ -155,20 +161,27 @@ def stt_api():
 @app.route("/stt", methods=["POST"])
 def stt_root():
     return _handle_stt_request()
-import requests
 
+# -------------------- 교정 API --------------------
 @app.route("/api/correct", methods=["POST"])
 def correct_text():
     try:
-        data = request.get_json(force=True)
-        text = data.get("text", "").strip()
+        data = request.get_json(force=True) or {}
+        text = (data.get("text") or "").strip()
 
         if not text:
             return j({"error": "empty_text", "detail": "text field is empty"}, 400)
 
-        # ✅ 허깅페이스 교정 모델로 호출 (원하면 본인 모델로 변경)
+        # 허깅페이스 교정 모델 호출 (환경변수로 교체 가능)
         HF_MODEL_ID = os.environ.get("HF_CORRECT_MODEL", "psyche/KoGrammarCorrection")
-        HF_TOKEN    = os.environ.get("HF_TOKEN")  # Render 환경변수에 추가 필수
+        HF_TOKEN    = os.environ.get("HF_TOKEN")
+
+        if not HF_TOKEN:
+            # 토큰이 없으면 간단한 로컬 규칙으로만 응답(서비스 죽지 않도록)
+            corrected = text.replace("  ", " ").strip()
+            if corrected and not corrected.endswith(('.', '!', '?')):
+                corrected += '.'
+            return j({"corrected": corrected}, 200)
 
         headers = {
             "Authorization": f"Bearer {HF_TOKEN}",
@@ -189,30 +202,18 @@ def correct_text():
         # HF 응답 파싱 (generated_text 또는 text 사용)
         corrected = None
         if isinstance(result, list) and result:
-            corrected = result[0].get("generated_text") or result[0].get("text")
+            item = result[0] or {}
+            corrected = item.get("generated_text") or item.get("text")
 
         if not corrected:
-            corrected = text  # 파싱 실패 시 원문 반환(최소 안전장치)
+            corrected = text  # 파싱 실패 시 원문 반환(안전장치)
 
         return j({"corrected": corrected.strip()}, 200)
 
     except Exception as e:
         return j({"error": "correct_failed", "detail": str(e)}, 500)
-": "empty_text", "detail": "text field is empty"}, 400)
 
-        # --- 교정 로직 (간단 예시) ---
-        corrected = text
-        corrected = corrected.replace("  ", " ")  # 두 칸 이상 공백 제거
-        corrected = corrected.strip().capitalize()  # 문장 첫글자 대문자
-
-        # 문장 끝에 마침표 붙이기 (없을 경우)
-        if not corrected.endswith(('.', '!', '?')):
-            corrected += '.'
-        print(f"[DEBUG] Corrected text: {corrected}")       # ✅ 추가
-        return j({"corrected": corrected}, 200)
-    except Exception as e:
-        return j({"error": "correct_failed", "detail": str(e)}, 500)
-
+# -------------------- 앱 실행 --------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
