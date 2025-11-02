@@ -4,4 +4,3 @@ gunicorn
 requests
 imageio-ffmpeg
 faster-whisper==1.0.3
-av==12.0.0
