@@ -1,5 +1,7 @@
 flask
 flask-cors
 gunicorn
+requests
 faster-whisper
+pydub
 imageio-ffmpeg
