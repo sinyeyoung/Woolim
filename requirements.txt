@@ -3,4 +3,6 @@ flask-cors
 gunicorn
 requests
 imageio-ffmpeg
+pydub
 faster-whisper==1.0.3
+numpy<2
