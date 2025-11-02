@@ -213,6 +213,17 @@ def correct_text():
     except Exception as e:
         return j({"error": "correct_failed", "detail": str(e)}, 500)
 
+import threading
+def _warmup():
+    try:
+        print("[WARMUP] Loading Whisper model...")
+        get_model()
+        print("[WARMUP] Model loaded successfully.")
+    except Exception as e:
+        print("[WARMUP] Warmup failed:", e)
+threading.Thread(target=_warmup, daemon=True).start()
+
+
 # -------------------- 앱 실행 --------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
