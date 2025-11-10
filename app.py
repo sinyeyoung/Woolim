@@ -1,20 +1,92 @@
 # app.py
 from __future__ import annotations
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import re
+import io
 import os
 import tempfile
-import threading
-import importlib
 
+# ───────────────────────── Flask ─────────────────────────
 app = Flask(__name__)
+CORS(app)  # 모바일/웹 호출 모두 안전하게 허용
 
-# ───────────────────────── Health ─────────────────────────
 @app.get("/health")
 def health():
     return jsonify(ok=True), 200
 
-# ───────────────────────── Correct API ─────────────────────────
+
+# ───────────────────────── STT (faster-whisper) ─────────────────────────
+# Render 저사양 환경 대비: 가장 가벼운 tiny/int8로 시작
+# 필요 시 환경변수로 조절 가능 (WHISPER_MODEL, COMPUTE_TYPE)
+from faster_whisper import WhisperModel
+import soundfile as sf
+
+MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")   # tiny / base 등
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # int8 / int8_float32 등
+
+# ★ 앱 시작 시 전역 1회 로드(콜드스타트/메모리 안정)
+model = WhisperModel(MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE)
+
+@app.post("/api/stt")
+def api_stt():
+    """
+    기대 형식:
+      - multipart/form-data: field name 'file' (Content-Type: audio/wav)
+      - 또는 raw audio/* 바디
+    입력은 16kHz mono WAV(PCM) 권장
+    """
+    # 1) 오디오 바이트 수신
+    wav_bytes: bytes | None = None
+    if "file" in request.files:
+        wav_bytes = request.files["file"].read()
+    else:
+        ctype = request.headers.get("Content-Type", "")
+        if ctype.startswith("audio/"):
+            wav_bytes = request.get_data()
+
+    if not wav_bytes:
+        return jsonify(error="no_audio", detail="audio file not found"), 400
+
+    # 2) WAV 파싱 (가능하면 메모리상에서 처리)
+    try:
+        # dtype=float32로 바로 변환, 1D(np.float32) 배열 반환
+        audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32", always_2d=False)
+    except Exception:
+        # 드물게 헤더가 이상한 경우 임시파일 경유
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(wav_bytes)
+                tmp_path = tmp.name
+            audio, sr = sf.read(tmp_path, dtype="float32", always_2d=False)
+        except Exception as e2:
+            return jsonify(error="decode_failed", detail=str(e2)), 415
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    if sr != 16000:
+        # 서버를 단순화: 리샘플 없이 16k만 허용(앱에서 16k로 녹음 중)
+        return jsonify(error="sr_mismatch", expect=16000, got=sr), 415
+
+    # 3) 추론(저사양 안전 옵션)
+    try:
+        segments, info = model.transcribe(
+            audio,                       # np.ndarray(float32), mono
+            language="ko",               # 한국어 고정
+            beam_size=1,                 # 메모리/시간 최소
+            vad_filter=True,             # 무음 구간 필터
+        )
+        text = "".join(s.text for s in segments).strip()
+        return jsonify(text=text or ""), 200
+    except Exception as e:
+        # 클라이언트가 원인을 알 수 있게 상세 전달
+        return jsonify(error="stt_failed", detail=str(e)), 500
+
+
+# ───────────────────────── Correct API (문장 어미 보정) ─────────────────────────
 @app.post("/api/correct")
 def api_correct():
     data = request.get_json(silent=True) or {}
@@ -37,56 +109,6 @@ def api_correct():
         return jsonify(original=text, corrected=corrected), 200
     except Exception as e:
         return jsonify(error="internal_error", message=str(e)), 500
-
-
-# ───────────────────────── STT API (faster-whisper, 지연 임포트) ─────────────────────────
-_model = None
-_model_lock = threading.Lock()
-
-def _get_model():
-    global _model
-    if _model is not None:
-        return _model
-    with _model_lock:
-        if _model is None:
-            fw = importlib.import_module("faster_whisper")
-            WhisperModel = getattr(fw, "WhisperModel")
-            # Render 무료/CPU 기준: 모델 크기는 tiny/base/small 중 선택
-            _model = WhisperModel("base", device="cpu", compute_type="int8")
-    return _model
-
-@app.post("/api/stt")
-def api_stt():
-    # 1) 멀티파트(file) 또는 2) RAW(audio/wav) 모두 수신
-    if "file" in request.files:
-        wav_bytes = request.files["file"].read()
-    else:
-        ctype = request.headers.get("Content-Type", "")
-        if ctype.startswith("audio/"):
-            wav_bytes = request.get_data()
-        else:
-            return jsonify({"error": "no audio file found"}), 400
-
-    if not wav_bytes:
-        return jsonify({"error": "empty audio body"}), 400
-
-    # 임시 WAV 파일로 저장 (경로 입력이 더 안정적)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(wav_bytes)
-        tmp_path = tmp.name
-
-    try:
-        model = _get_model()
-        segments, info = model.transcribe(tmp_path, vad_filter=True)
-        text = "".join(seg.text for seg in segments).strip()
-        return jsonify({"text": text or ""}), 200
-    except Exception as e:
-        return jsonify({"error": "stt_failed", "detail": str(e)}), 500
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
 
 
 # ───────────────────────── Core Logic (어미 보정) ─────────────────────────
@@ -194,6 +216,8 @@ def _split_keep_delim(s: str):
         out.append((seg, delim))
     return out
 
-# ───────────── 앱 기동 ─────────────
+
+# ───────────── 앱 기동 (로컬 실행용) ─────────────
 if __name__ == "__main__":
+    # gunicorn 환경에선 무시됨. 로컬 테스트용.
     app.run(host="0.0.0.0", port=5000, debug=False)
