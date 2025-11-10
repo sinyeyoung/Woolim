@@ -1,7 +1,13 @@
+# render.yaml 예시
 services:
   - type: web
     name: Woolim
-    runtime: python
-    pythonVersion: 3.11.9
-    buildCommand: pip install --upgrade pip wheel setuptools && pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    env: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -k gthread --threads 8 --timeout 300 --keep-alive 5 --graceful-timeout 30 'app:app'
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: WEB_CONCURRENCY          # Render가 자체 추정으로 워커 늘리지 않게 고정
+        value: "1"
