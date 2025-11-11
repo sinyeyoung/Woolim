@@ -6,6 +6,8 @@ import io, os, re, tempfile
 import numpy as np
 import soundfile as sf
 from faster_whisper import WhisperModel
+import threading
+_ASR_LOCK = threading.Lock()
 
 app = Flask(__name__)
 CORS(app)
