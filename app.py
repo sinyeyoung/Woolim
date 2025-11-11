@@ -2,58 +2,56 @@
 from __future__ import annotations
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import re
-import io
-import os
-import tempfile
+import io, os, re, tempfile
+import numpy as np
+import soundfile as sf
+from faster_whisper import WhisperModel
 
-# ───────────────────────── Flask ─────────────────────────
 app = Flask(__name__)
-CORS(app)  # 모바일/웹 호출 모두 안전하게 허용
+CORS(app)
 
 @app.get("/health")
 def health():
     return jsonify(ok=True), 200
 
-
-# ───────────────────────── STT (faster-whisper) ─────────────────────────
-# Render 저사양 환경 대비: 가장 가벼운 tiny/int8로 시작
-# 필요 시 환경변수로 조절 가능 (WHISPER_MODEL, COMPUTE_TYPE)
-from faster_whisper import WhisperModel
-import soundfile as sf
-
-MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")   # tiny / base 등
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # int8 / int8_float32 등
-
-# ★ 앱 시작 시 전역 1회 로드(콜드스타트/메모리 안정)
+# ───────────────── Whisper Model ─────────────────
+MODEL_NAME   = os.getenv("WHISPER_MODEL", "tiny")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
 model = WhisperModel(MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE)
+
+def _to_mono(x: np.ndarray) -> np.ndarray:
+    # x: float32, shape (n,) or (n, ch)
+    if x.ndim == 2:  # (n, ch)
+        return x.mean(axis=1).astype("float32", copy=False)
+    return x.astype("float32", copy=False)
 
 @app.post("/api/stt")
 def api_stt():
     """
     기대 형식:
-      - multipart/form-data: field name 'file' (Content-Type: audio/wav)
-      - 또는 raw audio/* 바디
-    입력은 16kHz mono WAV(PCM) 권장
+      - multipart/form-data: field 'file' (Content-Type: audio/wav)
+      - 또는 raw body with Content-Type: audio/*
+    입력 권장: 16kHz mono PCM WAV
     """
-    # 1) 오디오 바이트 수신
+    # 1) 입력 수신
     wav_bytes: bytes | None = None
     if "file" in request.files:
-        wav_bytes = request.files["file"].read()
+        f = request.files["file"]
+        wav_bytes = f.read()
+        app.logger.info(f"[STT] file upload: name={getattr(f, 'filename', '')}, ctype={getattr(f, 'content_type', '')}, size={len(wav_bytes)}")
     else:
         ctype = request.headers.get("Content-Type", "")
         if ctype.startswith("audio/"):
             wav_bytes = request.get_data()
+            app.logger.info(f"[STT] raw audio body: ctype={ctype}, size={len(wav_bytes)}")
 
     if not wav_bytes:
         return jsonify(error="no_audio", detail="audio file not found"), 400
 
-    # 2) WAV 파싱 (가능하면 메모리상에서 처리)
+    # 2) 디코드
     try:
-        # dtype=float32로 바로 변환, 1D(np.float32) 배열 반환
         audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32", always_2d=False)
-    except Exception:
-        # 드물게 헤더가 이상한 경우 임시파일 경유
+    except Exception as e1:
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(wav_bytes)
@@ -62,47 +60,43 @@ def api_stt():
         except Exception as e2:
             return jsonify(error="decode_failed", detail=str(e2)), 415
         finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            try: os.remove(tmp_path)
+            except Exception: pass
 
+    # 3) 샘플레이트/채널 확인
     if sr != 16000:
-        # 서버를 단순화: 리샘플 없이 16k만 허용(앱에서 16k로 녹음 중)
         return jsonify(error="sr_mismatch", expect=16000, got=sr), 415
+    audio = _to_mono(np.array(audio, dtype="float32", copy=False))
 
-    # 3) 추론(저사양 안전 옵션)
+    # 4) 추론
     try:
         segments, info = model.transcribe(
-            audio,                       # np.ndarray(float32), mono
-            language="ko",               # 한국어 고정
-            beam_size=1,                 # 메모리/시간 최소
-            vad_filter=True,             # 무음 구간 필터
+            audio,
+            language="ko",
+            beam_size=1,
+            vad_filter=True,
         )
         text = "".join(s.text for s in segments).strip()
         return jsonify(text=text or ""), 200
     except Exception as e:
-        # 클라이언트가 원인을 알 수 있게 상세 전달
+        app.logger.exception("[STT] transcribe failed")
         return jsonify(error="stt_failed", detail=str(e)), 500
 
-
-# ───────────────────────── Correct API (문장 어미 보정) ─────────────────────────
+# ───────────────── Correct API ─────────────────
 @app.post("/api/correct")
 def api_correct():
     data = request.get_json(silent=True) or {}
-    text: str = (data.get("text") or "").strip()
-    mode: str = (data.get("mode") or "ending").strip()
-    style: str = (data.get("style") or "yo").strip()
-
+    text  = (data.get("text")  or "").strip()
+    mode  = (data.get("mode")  or "ending").strip()
+    style = (data.get("style") or "yo").strip()
     if not text:
         return jsonify(error="no text provided"), 400
-
     try:
         norm = _normalize(text)
-        if mode == "ending":
+        if mode in ("ending", "formal", "hae"):
+            if mode == "formal": style = "formal"
+            elif mode == "hae":  style = "hae"
             corrected = correct_ending(norm, style=style)
-        elif mode == "formal":
-            corrected = correct_ending(norm, style="formal")
         else:
             corrected = norm
         corrected = _post_normalize(corrected)
@@ -110,27 +104,21 @@ def api_correct():
     except Exception as e:
         return jsonify(error="internal_error", message=str(e)), 500
 
-
-# ───────────────────────── Core Logic (어미 보정) ─────────────────────────
+# ───────────── Core (어미 보정) ─────────────
 def correct_ending(s: str, style: str = "yo") -> str:
     parts = _split_keep_delim(s)
-    fixed_parts = []
+    fixed = []
     for seg, delim in parts:
         seg_strip = seg.strip()
         if not seg_strip:
-            fixed_parts.append(seg + delim)
-            continue
+            fixed.append(seg + delim); continue
         seg_strip = _micro_fixes(seg_strip)
-        if style == "yo":
-            seg_strip = _to_haeyo(seg_strip)
-        elif style == "hae":
-            seg_strip = _to_hae(seg_strip)
-        elif style == "formal":
-            seg_strip = _to_formal(seg_strip)
-        if delim == "":
-            delim = "."
-        fixed_parts.append(seg_strip + delim)
-    result = "".join(fixed_parts)
+        if style == "yo":     seg_strip = _to_haeyo(seg_strip)
+        elif style == "hae":  seg_strip = _to_hae(seg_strip)
+        elif style == "formal": seg_strip = _to_formal(seg_strip)
+        if delim == "": delim = "."
+        fixed.append(seg_strip + delim)
+    result = "".join(fixed)
     result = re.sub(r"\s+([,.?!])", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip()
@@ -141,8 +129,6 @@ def _to_haeyo(seg: str) -> str:
         (r"한다\b", "해요"), (r"한다면\b", "하면요"), (r"한다니까\b", "한다니까요"),
         (r"한다니\b", "한다니요"), (r"한다며\b", "한다면서요"), (r"했지\b", "했죠"),
         (r"해\b", "해요"), (r"자\b", "가요"), (r"야\b", "예요"),
-        (r"이야\b", None), (r"거야\b", "거예요"), (r"거지\b", "거죠"),
-        (r"거네\b", "거리네요"), (r"거든\b", "거든요"),
         (r"자야돼\b", "자야 돼요"), (r"돼\b", "돼요"), (r"돼야\b", "돼야 해요"),
         (r"했단\b", "했다는"), (r"했음\b", "했습니다"),
     ]
@@ -153,7 +139,7 @@ def _to_haeyo(seg: str) -> str:
 def _to_hae(seg: str) -> str:
     repl = [
         (r"했어요\b", "했어"), (r"합니다\b", "해"), (r"합니다만\b", "하지만"),
-        (r"합니까\b", "해?"), (r"해요\b", "해"), (r"이에요\b", "이야"),
+        (r"합니까\b", "해\?"), (r"해요\b", "해"), (r"이에요\b", "이야"),
         (r"예요\b", "야"), (r"거예요\b", "거야"), (r"거죠\b", "거지"),
         (r"됩니다\b", "돼"), (r"돼요\b", "돼"),
     ]
@@ -191,14 +177,12 @@ def _micro_fixes(seg: str) -> str:
 
 def _apply_pairs(seg: str, pairs: list[tuple[str, str | None]]) -> str:
     for pat, rep in pairs:
-        if rep is None:
-            continue
+        if rep is None: continue
         seg = re.sub(pat, rep)
     return seg
 
 def _i_yeyo(last_char: str) -> str:
-    code = ord(last_char)
-    jong = (code - 0xAC00) % 28
+    code = ord(last_char); jong = (code - 0xAC00) % 28
     return last_char + ("이에요" if jong != 0 else "예요")
 
 def _ensure_polite(seg: str) -> str:
@@ -216,8 +200,5 @@ def _split_keep_delim(s: str):
         out.append((seg, delim))
     return out
 
-
-# ───────────── 앱 기동 (로컬 실행용) ─────────────
 if __name__ == "__main__":
-    # gunicorn 환경에선 무시됨. 로컬 테스트용.
     app.run(host="0.0.0.0", port=5000, debug=False)
