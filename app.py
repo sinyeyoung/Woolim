@@ -4,7 +4,108 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import io, os, re, tempfile
 import numpy as np
+import soundfile as sffrom __future__ import annotations
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import io, os, re, tempfile, threading, time
+import numpy as np
 import soundfile as sf
+from faster_whisper import WhisperModel
+
+app = Flask(__name__)
+CORS(app)
+
+MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
+model = None
+_ASR_LOCK = threading.Lock()
+_WARMED = False
+
+# ---------------- 웜업 ----------------
+def _load_model():
+    global model, _WARMED
+    if _WARMED:
+        return
+    try:
+        app.logger.info("[INIT] loading whisper model...")
+        model = WhisperModel(MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE)
+        dummy = np.zeros(8000, dtype="float32")
+        with _ASR_LOCK:
+            _ = model.transcribe(dummy, language="ko", beam_size=1, vad_filter=True)
+        _WARMED = True
+        app.logger.info("[INIT] warmup done.")
+    except Exception as e:
+        app.logger.error(f"[INIT] warmup failed: {e}")
+
+@app.before_first_request
+def warmup():
+    threading.Thread(target=_load_model, daemon=True).start()
+
+@app.get("/warm")
+def warm():
+    _load_model()
+    return jsonify(ok=True)
+
+@app.get("/health")
+def health():
+    return jsonify(ok=True)
+
+# ---------------- STT ----------------
+def _to_mono(x: np.ndarray) -> np.ndarray:
+    if x.ndim == 2:
+        return x.mean(axis=1).astype("float32", copy=False)
+    return x.astype("float32", copy=False)
+
+@app.post("/api/stt")
+def api_stt():
+    global model
+    if model is None:
+        return jsonify(error="model_not_ready", detail="모델이 아직 로딩 중입니다. 잠시 후 다시 시도해주세요."), 503
+
+    if "file" not in request.files:
+        return jsonify(error="no_audio"), 400
+
+    f = request.files["file"]
+    wav_bytes = f.read()
+    try:
+        audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32", always_2d=False)
+    except Exception as e:
+        return jsonify(error="decode_failed", detail=str(e)), 415
+
+    if sr != 16000:
+        return jsonify(error="sr_mismatch", expect=16000, got=sr), 415
+    audio = _to_mono(audio)
+
+    # 비동기로 Whisper 돌림 (즉시 응답)
+    def _run_stt():
+        try:
+            with _ASR_LOCK:
+                segments, _ = model.transcribe(audio, language="ko", beam_size=1, vad_filter=True)
+            text = "".join(s.text for s in segments).strip()
+            app.logger.info(f"[STT] done: {text}")
+        except Exception as e:
+            app.logger.error(f"[STT] failed: {e}")
+
+    threading.Thread(target=_run_stt, daemon=True).start()
+    # 바로 응답 보내서 Flutter가 안 멈춤
+    return jsonify(text="처리 중입니다. 잠시 후 다시 시도해주세요."), 202
+
+# ---------------- Correct ----------------
+@app.post("/api/correct")
+def correct():
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify(error="no_text"), 400
+    text = re.sub(r"되요", "돼요", text)
+    text = re.sub(r"했어\b", "했어요", text)
+    text = re.sub(r"한다\b", "해요", text)
+    text = re.sub(r"야\b", "예요", text)
+    return jsonify(corrected=text), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
+
 from faster_whisper import WhisperModel
 import threading
 _ASR_LOCK = threading.Lock()
