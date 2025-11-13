@@ -28,7 +28,7 @@ def _load_model():
         return
     try:
         app.logger.info("[INIT] loading whisper model...")
-        model = WhisperModel(MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE)
+        model = WhisperModel(MODEL_NAME, device="gpu", compute_type=COMPUTE_TYPE)
         dummy = np.zeros(8000, dtype="float32")
         with _ASR_LOCK:
             _ = model.transcribe(dummy, language="ko", beam_size=1, vad_filter=True)
