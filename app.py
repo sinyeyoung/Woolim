@@ -62,15 +62,19 @@ def warm():
         return jsonify(ok=True), 200
     return jsonify(ok=False, error=err), 500
 
-@app.before_first_request
-def _auto_warm_once():
-    def _bg():
+# ───────────────── 서버 시작 시 1회 자동 웜업 (Flask 3.x 호환 버전) ─────────────────
+def _auto_warm_once_bg():
+    try:
         ok, err = _do_warm()
         if ok:
             app.logger.info("[AUTO_WARM] done")
         else:
             app.logger.warning(f"[AUTO_WARM] failed: {err}")
-    threading.Thread(target=_bg, daemon=True).start()
+    except Exception:
+        app.logger.exception("[AUTO_WARM] unexpected error")
+
+# 모듈 로드 시 백그라운드 스레드에서 한 번만 실행
+threading.Thread(target=_auto_warm_once_bg, daemon=True).start()
 
 # ───────────────── STT API ─────────────────
 @app.post("/api/stt")
