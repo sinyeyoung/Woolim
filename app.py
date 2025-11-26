@@ -62,7 +62,7 @@ def warm():
         return jsonify(ok=True), 200
     return jsonify(ok=False, error=err), 500
 
-# ───────────────── 서버 시작 시 1회 자동 웜업 (Flask 3.x 호환 버전) ─────────────────
+# ───────────────── 서버 시작 시 1회 자동 웜업 ─────────────────
 def _auto_warm_once_bg():
     try:
         ok, err = _do_warm()
@@ -73,7 +73,6 @@ def _auto_warm_once_bg():
     except Exception:
         app.logger.exception("[AUTO_WARM] unexpected error")
 
-# 모듈 로드 시 백그라운드 스레드에서 한 번만 실행
 threading.Thread(target=_auto_warm_once_bg, daemon=True).start()
 
 # ───────────────── STT API ─────────────────
@@ -185,27 +184,27 @@ def api_correct():
             corrected = norm
         corrected = _post_normalize(corrected)
 
-        # 2) 디버그 로그 찍기 (Render Logs에서 확인용)
+        # 2) 디버그 로그
         print("===== /api/correct called =====", flush=True)
         print("original(text):", text, flush=True)
         print("corrected:", corrected, flush=True)
 
-        # 3) 클라이언트로 응답
+        # 3) 응답
         return jsonify(original=text, corrected=corrected), 200
     except Exception as e:
         print("[/api/correct] error:", str(e), flush=True)
         return jsonify(error="internal_error", message=str(e)), 500
 
 
-# ───────────── 어미 보정 로직들 (그대로 재사용) ─────────────
+# ───────────── 어미 보정 로직들 ─────────────
 
 # 자주 틀리는 단어/표현 간단 교정 사전
 COMMON_WORD_FIXES = {
     "환열": "환율",
-    "에너아":"엔화",
-    "환유":"환율",
+    "환유": "환율",
+    "한유": "환율",
+    "에너아": "엔화",
     # 필요하면 여기 계속 추가 가능
-    # "알여줘": "알려줘",
 }
 
 def correct_ending(s: str, style: str = "yo") -> str:
@@ -227,7 +226,7 @@ def correct_ending(s: str, style: str = "yo") -> str:
             delim = "."
         fixed.append(seg_strip + delim)
     result = "".join(fixed)
-    result = re.sub(r"\s+([,.?!])", r"\1", result)
+    result = re.sub(r"\s+([.?!])", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip()
 
@@ -271,19 +270,21 @@ def _normalize(s: str) -> str:
     return s.strip()
 
 def _post_normalize(s: str) -> str:
-    s = re.sub(r"\s+([,.?!])", r"\1", s)
+    # 콤마 제거 (교정 문장에서는 콤마를 아예 안 쓰기)
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+([.?!])", r"\1", s)
     s = re.sub(r"\s{2,}", " ", s)
     return s.strip()
 
 def _micro_fixes(seg: str) -> str:
-    # 기존 맞춤법/띄어쓰기 보정
+    # 기본 맞춤법 보정
     seg = re.sub(r"되요\b", "돼요", seg)
     seg = re.sub(r"돼\s?야\b", "돼야", seg)
     seg = seg.replace("자야돼", "자야 돼")
     seg = re.sub(r"\b것 이\b", "것이", seg)
     seg = re.sub(r"\b거 야\b", "거야", seg)
 
-    # 추가: 단어 사전 기반 교정 (예: 환열 → 환율)
+    # 단어 사전 기반 교정 (에너아→엔화, 환유/한유→환율 등)
     for wrong, right in COMMON_WORD_FIXES.items():
         if wrong in seg:
             seg = seg.replace(wrong, right)
@@ -294,7 +295,7 @@ def _apply_pairs(seg: str, pairs: list[tuple[str, str | None]]) -> str:
     for pat, rep in pairs:
         if rep is None:
             continue
-        seg = re.sub(pat, rep)
+        seg = re.sub(pat, rep, seg)  # 반드시 세 번째 인자로 seg 사용
     return seg
 
 def _i_yeyo(last_char: str) -> str:
