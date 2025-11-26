@@ -198,6 +198,14 @@ def api_correct():
 
 
 # ───────────── 어미 보정 로직들 (그대로 재사용) ─────────────
+
+# 자주 틀리는 단어/표현 간단 교정 사전
+COMMON_WORD_FIXES = {
+    "환열": "환율",
+    # 필요하면 여기 계속 추가 가능
+    # "알여줘": "알려줘",
+}
+
 def correct_ending(s: str, style: str = "yo") -> str:
     parts = _split_keep_delim(s)
     fixed = []
@@ -266,11 +274,18 @@ def _post_normalize(s: str) -> str:
     return s.strip()
 
 def _micro_fixes(seg: str) -> str:
+    # 기존 맞춤법/띄어쓰기 보정
     seg = re.sub(r"되요\b", "돼요", seg)
     seg = re.sub(r"돼\s?야\b", "돼야", seg)
     seg = seg.replace("자야돼", "자야 돼")
     seg = re.sub(r"\b것 이\b", "것이", seg)
     seg = re.sub(r"\b거 야\b", "거야", seg)
+
+    # 추가: 단어 사전 기반 교정 (예: 환열 → 환율)
+    for wrong, right in COMMON_WORD_FIXES.items():
+        if wrong in seg:
+            seg = seg.replace(wrong, right)
+
     return seg
 
 def _apply_pairs(seg: str, pairs: list[tuple[str, str | None]]) -> str:
