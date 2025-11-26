@@ -173,6 +173,7 @@ def api_correct():
         return jsonify(error="no text provided"), 400
 
     try:
+        # 1) 정규화 + 어미 보정
         norm = _normalize(text)
         if mode in ("ending", "formal", "hae"):
             if mode == "formal":
@@ -183,9 +184,18 @@ def api_correct():
         else:
             corrected = norm
         corrected = _post_normalize(corrected)
+
+        # 2) 디버그 로그 찍기 (Render Logs에서 확인용)
+        print("===== /api/correct called =====", flush=True)
+        print("original(text):", text, flush=True)
+        print("corrected:", corrected, flush=True)
+
+        # 3) 클라이언트로 응답
         return jsonify(original=text, corrected=corrected), 200
     except Exception as e:
+        print("[/api/correct] error:", str(e), flush=True)
         return jsonify(error="internal_error", message=str(e)), 500
+
 
 # ───────────── 어미 보정 로직들 (그대로 재사용) ─────────────
 def correct_ending(s: str, style: str = "yo") -> str:
