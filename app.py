@@ -306,10 +306,18 @@ def _i_yeyo(last_char: str) -> str:
     return last_char + ("이에요" if jong != 0 else "예요")
 
 def _ensure_polite(seg: str) -> str:
-    if re.search(r"[가-힣]$", seg) and not re.search(r"(요|다|함|임|니다|해|해요|다며|다니)$", seg):
-        ch = seg[-1]
-        seg = re.sub(r"[가-힣]$", _i_yeyo(ch), seg)
-    return seg
+    # 한글로 끝나지 않으면 손대지 않음
+    if not re.search(r"[가-힣]$", seg):
+        return seg
+
+    # 이미 공손한 끝말들(요, 해요, 입니다, 했어요, 했죠, 죠 등)은 그대로 둔다
+    if re.search(r"(요|죠|다|함|임|니다|해요|했어요|했죠|다며|다니)$", seg):
+        return seg
+
+    # 그 외에 정말 맨몸 명사/동사로 끝날 때만 '예요/이에요'를 붙인다
+    ch = seg[-1]
+    return re.sub(r"[가-힣]$", _i_yeyo(ch), seg)
+
 
 def _split_keep_delim(s: str):
     tokens = re.split(r"([.?!])", s)
