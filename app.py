@@ -82,8 +82,7 @@ def api_stt():
     Flutter 쪽에서:
       - URL: https://woolim.onrender.com/api/stt
       - method: POST
-      - headers: Content-Type: application/octet-stream
-      - body: 16kHz mono WAV bytes
+      - body: 16kHz mono WAV (multipart/form-data 또는 raw bytes)
     """
 
     # 1) 입력 받기
@@ -226,7 +225,7 @@ def _to_haeyo(seg: str) -> str:
         (r"했어\b", "했어요"), (r"했구나\b", "했군요"), (r"했네\b", "했네요"),
         (r"한다\b", "해요"), (r"한다면\b", "하면요"), (r"한다니까\b", "한다니까요"),
         (r"한다니\b", "한다니요"), (r"한다며\b", "한다면서요"), (r"했지\b", "했죠"),
-        (r"해\b", "해요"), (r"줘\b", "줘요"), (r"자\b", "가요"),   # ★ 여기 '줘\b' 추가
+        (r"해\b", "해요"), (r"줘\b", "줘요"), (r"자\b", "가요"),
         (r"자야돼\b", "자야 돼요"), (r"돼\b", "돼요"), (r"돼야\b", "돼야 해요"),
         (r"했단\b", "했다는"), (r"했음\b", "했습니다"),
     ]
@@ -267,25 +266,19 @@ def _post_normalize(s: str) -> str:
     return s.strip()
 
 def _micro_fixes(seg: str) -> str:
-    # 기본 맞춤법 보정
+    # 기본 맞춤법 및 자잘한 표현 보정만 수행
     seg = re.sub(r"되요\b", "돼요", seg)
     seg = re.sub(r"돼\s?야\b", "돼야", seg)
     seg = seg.replace("자야돼", "자야 돼")
     seg = re.sub(r"\b것 이\b", "것이", seg)
     seg = re.sub(r"\b거 야\b", "거야", seg)
-
-    # 단어 사전 기반 교정 (에너아→엔화, 환유/한유→환율 등)
-    for wrong, right in COMMON_WORD_FIXES.items():
-        if wrong in seg:
-            seg = seg.replace(wrong, right)
-
     return seg
 
 def _apply_pairs(seg: str, pairs: list[tuple[str, str | None]]) -> str:
     for pat, rep in pairs:
         if rep is None:
             continue
-        seg = re.sub(pat, rep, seg)  # 반드시 세 번째 인자로 seg 사용
+        seg = re.sub(pat, rep, seg)
     return seg
 
 def _i_yeyo(last_char: str) -> str:
