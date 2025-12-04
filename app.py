@@ -198,18 +198,6 @@ def api_correct():
 
 # ───────────── 어미 보정 로직들 ─────────────
 
-# 자주 틀리는 단어/표현 간단 교정 사전
-COMMON_WORD_FIXES = {
-    "환열": "환율",
-    "환유": "환율",
-    "한유": "환율",
-    "환영": "환율",
-    "환영을": "환율",
-    "에너아": "엔화",
-    "아이였죠": "알려줘",
-    # 필요하면 여기 계속 추가 가능
-}
-
 def correct_ending(s: str, style: str = "yo") -> str:
     parts = _split_keep_delim(s)
     fixed = []
